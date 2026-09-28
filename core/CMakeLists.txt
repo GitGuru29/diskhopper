@@ -1,0 +1,7 @@
+add_subdirectory(scanner)
+add_subdirectory(classifier)
+add_subdirectory(rules)
+add_subdirectory(cleaner)
+add_subdirectory(safety)
+add_subdirectory(analyzer)
+add_subdirectory(platform)
