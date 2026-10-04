@@ -46,7 +46,7 @@ diskhopper clean --safe --force --dry-run ~   # preview permanent deletes
 
 ## Benchmarks
 
-Measured on Apple Silicon, macOS 26, AppleClang 21, Release build. Allocated size uses `st_blocks * 512` (sparse-aware); hard links are counted once.
+Measured on Apple Silicon, macOS 27, AppleClang 21, Release build. Allocated size uses `st_blocks * 512` (sparse-aware); hard links are counted once.
 
 | Path | Items | Allocated | Scan time | Throughput |
 | --- | --- | --- | --- | --- |
