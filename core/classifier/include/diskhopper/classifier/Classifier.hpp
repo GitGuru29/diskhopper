@@ -56,8 +56,11 @@ public:
 
     Classification describe(const DirNode& node) const;
 
+    bool is_protected(const std::filesystem::path& path) const;
+
 private:
     bool rule_matches(const CleanupRule& rule, const DirNode& node) const;
+    bool path_matches(const CleanupRule& rule, const std::filesystem::path& path) const;
     const CleanupRule* best_cleanup_rule(const DirNode& node) const;
     bool is_under_or_equal(const std::filesystem::path& path,
                            const std::filesystem::path& base) const;

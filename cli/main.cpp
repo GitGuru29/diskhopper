@@ -8,13 +8,15 @@
 #include <vector>
 
 #include "diskhopper/classifier/Classifier.hpp"
+#include "diskhopper/cleaner/Cleaner.hpp"
+#include "diskhopper/platform/Trash.hpp"
 #include "diskhopper/platform/UserPaths.hpp"
 #include "diskhopper/rules/CleanupRule.hpp"
 #include "diskhopper/scanner/Scanner.hpp"
 
 namespace {
 
-const char* kVersion = "0.2.0";
+const char* kVersion = "0.3.0";
 
 struct Options {
     std::filesystem::path root = ".";
@@ -23,6 +25,12 @@ struct Options {
     bool json = false;
     bool help = false;
     bool version = false;
+    bool clean_safe = false;
+    bool clean_review = false;
+    bool force = false;
+    bool dry_run = false;
+    bool yes = false;
+    std::filesystem::path audit_path;
 };
 
 struct ParsedArgs {
@@ -39,16 +47,24 @@ void usage() {
         "  diskhopper scan [OPTIONS] [PATH]\n"
         "  diskhopper report [OPTIONS] [PATH]\n"
         "  diskhopper explain [OPTIONS] [PATH]\n"
+        "  diskhopper clean [OPTIONS] [PATH]\n"
         "\n"
         "Commands:\n"
         "  scan         Scan a directory tree and report sizes\n"
         "  report       Classify storage as SAFE / REVIEW / PROTECTED\n"
         "  explain      Break down why a path uses its space\n"
+        "  clean        Remove caches; REVIEW goes to Trash, SAFE only with --force\n"
         "\n"
         "Options:\n"
         "  --depth N    Max tree depth to print (default 2)\n"
         "  --top N      Top entries to list (default 10)\n"
         "  --json       Emit machine-readable JSON (scan only)\n"
+        "  --safe       Include SAFE items in a clean plan\n"
+        "  --review     Include REVIEW items in a clean plan\n"
+        "  --force      Permanently delete SAFE items (requires Time Machine)\n"
+        "  --dry-run    Show the plan without changing anything\n"
+        "  --audit FILE Append a session audit log to FILE\n"
+        "  --yes        Execute the plan (required to make changes)\n"
         "  --help       Show this help\n"
         "  --version    Show version\n",
         kVersion);
@@ -76,7 +92,7 @@ ParsedArgs parse_args(int argc, char** argv) {
     ParsedArgs out;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "scan" || arg == "report" || arg == "explain") {
+        if (arg == "scan" || arg == "report" || arg == "explain" || arg == "clean") {
             out.command = arg;
         } else if (arg == "--depth") {
             if (i + 1 >= argc) {
@@ -92,8 +108,25 @@ ParsedArgs parse_args(int argc, char** argv) {
                 return out;
             }
             out.opts.top_n = std::atoi(argv[++i]);
+        } else if (arg == "--audit") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "error: --audit requires a value\n");
+                out.ok = false;
+                return out;
+            }
+            out.opts.audit_path = argv[++i];
         } else if (arg == "--json") {
             out.opts.json = true;
+        } else if (arg == "--safe") {
+            out.opts.clean_safe = true;
+        } else if (arg == "--review") {
+            out.opts.clean_review = true;
+        } else if (arg == "--force") {
+            out.opts.force = true;
+        } else if (arg == "--dry-run") {
+            out.opts.dry_run = true;
+        } else if (arg == "--yes") {
+            out.opts.yes = true;
         } else if (arg == "--help") {
             out.opts.help = true;
         } else if (arg == "--version") {
@@ -405,6 +438,161 @@ void print_explain(const diskhopper::ScanResult& scan_result,
     std::printf("Nothing was deleted. This report is read-only.\n");
 }
 
+void collect_clean_items(const diskhopper::DirNode& node, bool ancestor_selected,
+                         bool pick_safe, bool pick_review, bool force,
+                         std::vector<diskhopper::CleanupItem>& out) {
+    const bool selected =
+        node.direct_match &&
+        (node.level == diskhopper::SafetyLevel::Safe && pick_safe) |
+        (node.level == diskhopper::SafetyLevel::Review && pick_review);
+    if (selected && !ancestor_selected) {
+        diskhopper::CleanupItem item;
+        item.path = node.path;
+        item.rule_id = node.rule_id;
+        item.rule_name = node.rule_name;
+        item.level = node.level;
+        item.bytes = node.allocated;
+        item.action = node.level == diskhopper::SafetyLevel::Safe && force
+                          ? diskhopper::CleanupActionKind::Delete
+                          : diskhopper::CleanupActionKind::Trash;
+        out.push_back(item);
+    }
+    for (const auto& child : node.children) {
+        collect_clean_items(*child, ancestor_selected || selected,
+                            pick_safe, pick_review, force, out);
+    }
+}
+
+const char* action_label(diskhopper::CleanupActionKind action) {
+    return action == diskhopper::CleanupActionKind::Trash ? "Trash" : "Delete";
+}
+
+uint64_t print_clean_plan(const std::vector<diskhopper::CleanupItem>& items) {
+    uint64_t total = 0;
+    uint64_t trash_bytes = 0;
+    uint64_t delete_bytes = 0;
+    for (const auto& item : items) {
+        std::printf("  %8s  [%-6s]  %-22s  %-7s  %s\n",
+                    human(item.bytes).c_str(),
+                    item.level == diskhopper::SafetyLevel::Safe ? "SAFE" : "REVIEW",
+                    item.rule_name.c_str(),
+                    action_label(item.action),
+                    item.path.string().c_str());
+        total += item.bytes;
+        if (item.action == diskhopper::CleanupActionKind::Trash) {
+            trash_bytes += item.bytes;
+        } else {
+            delete_bytes += item.bytes;
+        }
+    }
+    std::printf("Total cleanable: %s  (Trash %s, Delete %s)\n",
+                human(total).c_str(), human(trash_bytes).c_str(),
+                human(delete_bytes).c_str());
+    return total;
+}
+
+void print_clean_session(const diskhopper::CleanupSessionResult& result,
+                         const std::filesystem::path& audit_path) {
+    std::printf("\nSession result:\n");
+    std::printf("  Planned:  %zu\n", result.planned);
+    std::printf("  Succeeded: %zu   Failed: %zu\n", result.succeeded, result.failed);
+    if (result.bytes_freed > 0) {
+        std::printf("  Freed:    %s\n", human(result.bytes_freed).c_str());
+    }
+    if (result.failed > 0) {
+        std::printf("  Not freed: %s\n", human(result.bytes_failed).c_str());
+        const size_t shown = std::min<size_t>(result.items.size(), 5);
+        size_t printed = 0;
+        for (const auto& item : result.items) {
+            if (item.success) continue;
+            std::printf("    FAIL  %s  (%s)\n",
+                        item.path.string().c_str(), item.note.c_str());
+            if (++printed >= shown) break;
+        }
+    }
+    if (!audit_path.empty()) {
+        std::printf("  Audit log: %s\n", audit_path.string().c_str());
+    }
+}
+
+bool run_clean_command(const ParsedArgs& args) {
+    if (!args.opts.clean_safe && !args.opts.clean_review) {
+        std::fprintf(stderr, "error: select --safe and/or --review\n");
+        usage();
+        return false;
+    }
+
+    const std::filesystem::path home = diskhopper::home_directory();
+    diskhopper::Classifier classifier(home,
+                                      diskhopper::default_cleanup_rules(),
+                                      diskhopper::default_protection_rules());
+    diskhopper::Scanner scanner;
+    diskhopper::ScanResult scan_result = scanner.scan(args.opts.root);
+    if (!scan_result.tree) {
+        std::fprintf(stderr, "error: unable to scan '%s'\n", args.opts.root.c_str());
+        return false;
+    }
+    classifier.apply(*scan_result.tree);
+
+    std::vector<diskhopper::CleanupItem> items;
+    collect_clean_items(*scan_result.tree, false, args.opts.clean_safe,
+                        args.opts.clean_review, args.opts.force, items);
+    std::sort(items.begin(), items.end(),
+              [](const diskhopper::CleanupItem& a, const diskhopper::CleanupItem& b) {
+                  return a.bytes > b.bytes;
+              });
+    if (items.size() > static_cast<size_t>(args.opts.top_n)) {
+        items.resize(static_cast<size_t>(args.opts.top_n));
+    }
+
+    if (items.empty()) {
+        std::printf("Nothing is cleanable under '%s' with the selected rules.\n",
+                    scan_result.root.string().c_str());
+        return true;
+    }
+
+    std::printf("Plan for %s:\n", scan_result.root.string().c_str());
+    print_clean_plan(items);
+
+    const bool has_delete = std::any_of(
+        items.begin(), items.end(), [](const diskhopper::CleanupItem& item) {
+            return item.action == diskhopper::CleanupActionKind::Delete;
+        });
+
+    if (args.opts.dry_run) {
+        std::printf("\nNo files were modified. (dry run)\n");
+        return true;
+    }
+    if (has_delete && !args.opts.force) {
+        std::printf("\nNo files were modified."
+                    " SAFE items require --force for permanent deletion.\n");
+        return true;
+    }
+    if (has_delete && !diskhopper::time_machine_available()) {
+        std::printf("\nRefusing permanent deletion: Time Machine has no backup destination.\n");
+        std::printf("No files were modified. Add a Time Machine backup, or drop --force.\n");
+        return true;
+    }
+    if (!args.opts.yes) {
+        std::printf("\nNo files were modified. Add --yes to execute.\n");
+        return true;
+    }
+
+    diskhopper::Cleaner::Options options;
+    options.allow_permanent = args.opts.force;
+    options.protection_check = [&](const std::filesystem::path& path) {
+        return !classifier.is_protected(path);
+    };
+    options.permanent_gate = [] { return diskhopper::time_machine_available(); };
+    options.trash_fn = diskhopper::move_to_trash;
+    options.audit_path = args.opts.audit_path;
+
+    diskhopper::CleanupSessionResult result =
+        diskhopper::Cleaner::run(items, options);
+    print_clean_session(result, options.audit_path);
+    return true;
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -418,7 +606,8 @@ int main(int argc, char** argv) {
         std::printf("diskhopper %s\n", kVersion);
         return 0;
     }
-    if (args.command != "scan" && args.command != "report" && args.command != "explain") {
+    if (args.command != "scan" && args.command != "report" && args.command != "explain" &&
+        args.command != "clean") {
         if (args.command.empty()) {
             std::fprintf(stderr, "error: no command given\n\n");
         } else {
@@ -432,6 +621,10 @@ int main(int argc, char** argv) {
     if (!std::filesystem::exists(args.opts.root, ec)) {
         std::fprintf(stderr, "error: path does not exist: %s\n", args.opts.root.c_str());
         return 1;
+    }
+
+    if (args.command == "clean") {
+        return run_clean_command(args) ? 0 : 1;
     }
 
     diskhopper::Scanner scanner;

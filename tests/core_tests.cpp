@@ -6,6 +6,7 @@
 #include <string>
 
 #include "diskhopper/classifier/Classifier.hpp"
+#include "diskhopper/cleaner/Cleaner.hpp"
 #include "diskhopper/rules/CleanupRule.hpp"
 #include "diskhopper/scanner/Scanner.hpp"
 
@@ -136,11 +137,125 @@ void test_classification() {
           "report: cleanable total is sum of rule totals");
 }
 
+void test_cleaner() {
+    fs::path root = build_fixture();
+    dh::Scanner scanner;
+    dh::ScanResult result = scanner.scan(root);
+    dh::Classifier classifier(root, dh::default_cleanup_rules(),
+                              dh::default_protection_rules());
+    classifier.apply(*result.tree);
+
+    check(classifier.is_protected(root / "Documents"), "cleaner: Documents protected");
+    check(classifier.is_protected(root / "Downloads/AeroDrop"),
+          "cleaner: project inside Downloads protected");
+
+    fs::path trash_dir = root / "TRASH";
+    fs::create_directories(trash_dir);
+    dh::Cleaner::Options options;
+    options.allow_permanent = true;
+    options.permanent_gate = [] { return true; };
+    options.protection_check = [&](const fs::path& path) {
+        return path != (root / "cleanable");
+    };
+    options.trash_fn = [&](const fs::path& path, std::string& error) {
+        std::error_code ec;
+        fs::rename(path, trash_dir / path.filename(), ec);
+        if (ec) {
+            error = ec.message();
+            return false;
+        }
+        return true;
+    };
+    options.audit_path = root / "audit.log";
+
+    fs::path trash_target = root / "trash_me";
+    fs::path delete_target = root / "delete_me";
+    fs::path blocked = root / "cleanable";
+    fs::create_directories(trash_target);
+    fs::create_directories(delete_target);
+    fs::create_directories(blocked);
+    write_bytes(trash_target / "a.dat", 1024);
+    write_bytes(delete_target / "b.dat", 2048);
+    write_bytes(blocked / "keep.dat", 4096);
+
+    std::vector<dh::CleanupItem> items;
+    items.push_back({trash_target, "trash-rule", "Trash Rule",
+                     dh::SafetyLevel::Review, 1024,
+                     dh::CleanupActionKind::Trash});
+    items.push_back({delete_target, "delete-rule", "Delete Rule",
+                     dh::SafetyLevel::Safe, 2048,
+                     dh::CleanupActionKind::Delete});
+    items.push_back({blocked, "blocked-rule", "Blocked Rule",
+                     dh::SafetyLevel::Review, 123,
+                     dh::CleanupActionKind::Trash});
+
+    dh::CleanupSessionResult result_run = dh::Cleaner::run(items, options);
+    check(result_run.succeeded == 2, "cleaner: two items succeeded");
+    check(result_run.failed == 1, "cleaner: protected item refused");
+    check(result_run.bytes_freed == 3072, "cleaner: freed bytes accounted");
+    check(result_run.bytes_failed == 123, "cleaner: failed bytes accounted");
+    check(!fs::exists(trash_target), "cleaner: trashed target gone");
+    check(!fs::exists(delete_target), "cleaner: deleted target gone");
+    check(fs::exists(trash_dir / "trash_me"), "cleaner: trash received file");
+    check(fs::exists(blocked), "cleaner: protected item untouched");
+    check(fs::exists(root / "audit.log"), "cleaner: audit log written");
+    {
+        std::ifstream audit(root / "audit.log");
+        std::string contents((std::istreambuf_iterator<char>(audit)),
+                             std::istreambuf_iterator<char>());
+        check(contents.find("delete-rule") != std::string::npos,
+              "cleaner: audit records deleted path");
+        check(contents.find("FAIL") != std::string::npos,
+              "cleaner: audit records refusal");
+    }
+
+    dh::Cleaner::Options refused;
+    refused.allow_permanent = false;
+    refused.trash_fn = options.trash_fn;
+    dh::Cleaner::Options symlink_only;
+    symlink_only.allow_permanent = true;
+    symlink_only.trash_fn = options.trash_fn;
+
+    items.clear();
+    fs::path perm_target = root / "perm_me";
+    fs::create_directories(perm_target);
+    write_bytes(perm_target / "c.dat", 512);
+    items.push_back({perm_target, "delete-rule", "Delete Rule",
+                     dh::SafetyLevel::Safe, 1,
+                     dh::CleanupActionKind::Delete});
+    dh::CleanupSessionResult permanent_refused = dh::Cleaner::run(items, refused);
+    check(permanent_refused.failed == 1 &&
+              permanent_refused.items[0].note == "permanent deletion disabled",
+          "cleaner: permanent deletion requires allow_permanent");
+    check(fs::exists(perm_target), "cleaner: disabled permanent delete left target");
+
+    items.clear();
+    items.push_back({root / "no_such_path", "missing", "Missing",
+                     dh::SafetyLevel::Review, 1,
+                     dh::CleanupActionKind::Trash});
+    dh::CleanupSessionResult missing =
+        dh::Cleaner::run(items, symlink_only);
+    check(missing.failed == 1 && missing.items[0].note.find("no longer exists") != std::string::npos,
+          "cleaner: missing path refused");
+
+    items.clear();
+    items.push_back({root / "loop", "symlink", "Symlink",
+                     dh::SafetyLevel::Review, 1,
+                     dh::CleanupActionKind::Trash});
+    dh::CleanupSessionResult symlink_res =
+        dh::Cleaner::run(items, symlink_only);
+    check(symlink_res.failed == 1 &&
+              symlink_res.items[0].note.find("symlink") != std::string::npos,
+          "cleaner: symlink target refused");
+    check(fs::exists(root / "loop"), "cleaner: symlink untouched (loop survives)");
+}
+
 }
 
 int main() {
     test_scan();
     test_classification();
+    test_cleaner();
     std::printf("core_tests: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

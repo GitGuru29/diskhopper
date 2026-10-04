@@ -4,6 +4,7 @@ add_executable(core_tests
 
 target_link_libraries(core_tests PRIVATE
   diskhopper_classifier
+  diskhopper_cleaner
   diskhopper_scanner
   diskhopper_rules
 )

@@ -40,12 +40,27 @@ bool Classifier::is_under_or_equal(const std::filesystem::path& path,
     return true;
 }
 
-bool Classifier::rule_matches(const CleanupRule& rule, const DirNode& node) const {
+bool Classifier::path_matches(const CleanupRule& rule,
+                              const std::filesystem::path& path) const {
     switch (rule.kind) {
         case MatchKind::PathSubtree:
-            return is_under_or_equal(node.path, home_ / rule.value);
+            return is_under_or_equal(path, home_ / rule.value);
         case MatchKind::NameEquals:
-            return node.name == rule.value;
+            return path.filename().string() == rule.value;
+    }
+    return false;
+}
+
+bool Classifier::rule_matches(const CleanupRule& rule, const DirNode& node) const {
+    return path_matches(rule, node.path);
+}
+
+bool Classifier::is_protected(const std::filesystem::path& path) const {
+    std::error_code ec;
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(path, ec);
+    if (ec || resolved.empty()) resolved = path;
+    for (const auto& rule : protections_) {
+        if (path_matches(rule, resolved)) return true;
     }
     return false;
 }
