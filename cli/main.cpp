@@ -38,14 +38,16 @@ void usage() {
         "Usage:\n"
         "  diskhopper scan [OPTIONS] [PATH]\n"
         "  diskhopper report [OPTIONS] [PATH]\n"
+        "  diskhopper explain [OPTIONS] [PATH]\n"
         "\n"
         "Commands:\n"
         "  scan         Scan a directory tree and report sizes\n"
         "  report       Classify storage as SAFE / REVIEW / PROTECTED\n"
+        "  explain      Break down why a path uses its space\n"
         "\n"
         "Options:\n"
         "  --depth N    Max tree depth to print (default 2)\n"
-        "  --top N      Top cleanable locations to list (report, default 10)\n"
+        "  --top N      Top entries to list (default 10)\n"
         "  --json       Emit machine-readable JSON (scan only)\n"
         "  --help       Show this help\n"
         "  --version    Show version\n",
@@ -74,7 +76,7 @@ ParsedArgs parse_args(int argc, char** argv) {
     ParsedArgs out;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "scan" || arg == "report") {
+        if (arg == "scan" || arg == "report" || arg == "explain") {
             out.command = arg;
         } else if (arg == "--depth") {
             if (i + 1 >= argc) {
@@ -299,6 +301,110 @@ void print_report(const diskhopper::ScanResult& scan_result,
     std::printf("Nothing was deleted. This report is read-only.\n");
 }
 
+uint64_t own_bytes(const diskhopper::DirNode& node) {
+    uint64_t own = node.allocated;
+    for (const auto& child : node.children) own -= child->allocated;
+    return own;
+}
+
+const char* explain_tag(const diskhopper::Classification& classification) {
+    if (classification.name == "Project") return "PROJECT";
+    if (classification.name == "Other") return "OTHER";
+    switch (classification.level) {
+        case diskhopper::SafetyLevel::Safe:
+            return "SAFE";
+        case diskhopper::SafetyLevel::Review:
+            return "REVIEW";
+        default:
+            return "PROTECTED";
+    }
+}
+
+struct ExplainTotals {
+    uint64_t project = 0;
+    uint64_t safe = 0;
+    uint64_t review = 0;
+    uint64_t other = 0;
+};
+
+void collect_totals(const diskhopper::DirNode& node,
+                    const diskhopper::Classifier& classifier,
+                    ExplainTotals& totals) {
+    const diskhopper::Classification c = classifier.describe(node);
+    if (c.name == "Project") {
+        totals.project += node.allocated;
+        return;
+    }
+    const uint64_t own = own_bytes(node);
+    if (c.name == "Other") {
+        totals.other += own;
+    } else if (c.level == diskhopper::SafetyLevel::Safe) {
+        totals.safe += own;
+    } else if (c.level == diskhopper::SafetyLevel::Review) {
+        totals.review += own;
+    } else {
+        totals.other += own;
+    }
+    for (const auto& child : node.children) collect_totals(*child, classifier, totals);
+}
+
+void print_explain_children(const diskhopper::DirNode& node,
+                            const diskhopper::Classifier& classifier,
+                            int max_children) {
+    std::vector<const diskhopper::DirNode*> kids;
+    kids.reserve(node.children.size());
+    for (const auto& child : node.children) kids.push_back(child.get());
+    std::sort(kids.begin(), kids.end(),
+              [](const diskhopper::DirNode* a, const diskhopper::DirNode* b) {
+                  return a->allocated > b->allocated;
+              });
+
+    size_t shown = 0;
+    uint64_t hidden_bytes = 0;
+    size_t hidden_count = 0;
+    for (const diskhopper::DirNode* kid : kids) {
+        if (empty_node(*kid)) continue;
+        if (shown >= static_cast<size_t>(max_children)) {
+            hidden_bytes += kid->allocated;
+            ++hidden_count;
+            continue;
+        }
+        const diskhopper::Classification c = classifier.describe(*kid);
+        std::printf("  %8s  %-24s  [%-7s]  %s\n",
+                    human(kid->allocated).c_str(),
+                    kid->name.c_str(),
+                    explain_tag(c),
+                    c.reason.c_str());
+        ++shown;
+    }
+    if (hidden_count > 0) {
+        std::printf("  %8s  ... and %zu more items\n",
+                    human(hidden_bytes).c_str(), hidden_count);
+    }
+}
+
+void print_explain(const diskhopper::ScanResult& scan_result,
+                   const diskhopper::Classifier& classifier,
+                   int max_children) {
+    const diskhopper::DirNode& root = *scan_result.tree;
+    std::printf("diskhopper %s - explain\n", kVersion);
+    std::printf("Path: %s\n", root.path.string().c_str());
+    std::printf("  Total: %s - %s\n", human(root.allocated).c_str(), root.reason.c_str());
+    std::printf("  %llu files, %llu dirs\n\n",
+                static_cast<unsigned long long>(scan_result.stats.file_count),
+                static_cast<unsigned long long>(scan_result.stats.dir_count));
+
+    std::printf("Breakdown of what this path contains:\n");
+    print_explain_children(root, classifier, max_children);
+
+    ExplainTotals totals;
+    collect_totals(root, classifier, totals);
+    std::printf("\nTotals:  PROJECT %s  |  REVIEW %s  |  SAFE %s  |  OTHER %s\n",
+                human(totals.project).c_str(), human(totals.review).c_str(),
+                human(totals.safe).c_str(), human(totals.other).c_str());
+    std::printf("Nothing was deleted. This report is read-only.\n");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -312,7 +418,7 @@ int main(int argc, char** argv) {
         std::printf("diskhopper %s\n", kVersion);
         return 0;
     }
-    if (args.command != "scan" && args.command != "report") {
+    if (args.command != "scan" && args.command != "report" && args.command != "explain") {
         if (args.command.empty()) {
             std::fprintf(stderr, "error: no command given\n\n");
         } else {
@@ -348,6 +454,16 @@ int main(int argc, char** argv) {
         diskhopper::Report report =
             classifier.summarize(*result.tree, static_cast<size_t>(args.opts.top_n));
         print_report(result, report, diskhopper::default_protection_rules());
+        return 0;
+    }
+
+    if (args.command == "explain") {
+        const std::filesystem::path home = diskhopper::home_directory();
+        diskhopper::Classifier classifier(home,
+                                          diskhopper::default_cleanup_rules(),
+                                          diskhopper::default_protection_rules());
+        classifier.apply(*result.tree);
+        print_explain(result, classifier, args.opts.top_n);
         return 0;
     }
 

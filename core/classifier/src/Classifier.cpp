@@ -66,6 +66,65 @@ bool Classifier::is_project_root(const DirNode& node, std::string* marker_out) c
     return false;
 }
 
+const CleanupRule* Classifier::best_cleanup_rule(const DirNode& node) const {
+    const CleanupRule* best_rule = nullptr;
+    size_t best_specificity = 0;
+
+    auto specificity = [&](const CleanupRule& rule) -> size_t {
+        if (rule.kind == MatchKind::NameEquals) return static_cast<size_t>(1) << 30;
+        const std::filesystem::path target = home_ / rule.value;
+        size_t count = 0;
+        for (auto it = target.begin(); it != target.end(); ++it) {
+            ++count;
+        }
+        return count;
+    };
+
+    for (const auto& rule : cleanup_) {
+        if (!rule_matches(rule, node)) continue;
+        const size_t spec = specificity(rule);
+        if (best_rule == nullptr || spec > best_specificity ||
+            (spec == best_specificity && rule.level > best_rule->level)) {
+            best_rule = &rule;
+            best_specificity = spec;
+        }
+    }
+
+    return best_rule;
+}
+
+Classification Classifier::describe(const DirNode& node) const {
+    std::string marker;
+    if (options_.enable_project_detection && is_project_root(node, &marker)) {
+        Classification c;
+        c.level = SafetyLevel::Protected;
+        c.rule_id = "project.root";
+        c.name = "Project";
+        c.reason = "Project detected (marker: " + marker + ")";
+        c.direct_match = true;
+        return c;
+    }
+
+    const CleanupRule* rule = best_cleanup_rule(node);
+    if (rule != nullptr) {
+        Classification c;
+        c.level = rule->level;
+        c.rule_id = rule->id;
+        c.name = rule->name;
+        c.reason = rule->why;
+        c.direct_match = true;
+        return c;
+    }
+
+    Classification c;
+    c.level = SafetyLevel::Protected;
+    c.rule_id = "other";
+    c.name = "Other";
+    c.reason = "No rule matched; treated as user data.";
+    c.direct_match = true;
+    return c;
+}
+
 Classification Classifier::evaluate(const DirNode& node,
                                     const Classification* inherited) const {
     if (inherited != nullptr && inherited->level == SafetyLevel::Protected &&
@@ -98,29 +157,7 @@ Classification Classifier::evaluate(const DirNode& node,
         }
     }
 
-    const CleanupRule* best_rule = nullptr;
-    size_t best_specificity = 0;
-
-    auto specificity = [&](const CleanupRule& rule) -> size_t {
-        if (rule.kind == MatchKind::NameEquals) return static_cast<size_t>(1) << 30;
-        const std::filesystem::path target = home_ / rule.value;
-        size_t count = 0;
-        for (auto it = target.begin(); it != target.end(); ++it) {
-            ++count;
-        }
-        return count;
-    };
-
-    for (const auto& rule : cleanup_) {
-        if (!rule_matches(rule, node)) continue;
-        const size_t spec = specificity(rule);
-        if (best_rule == nullptr || spec > best_specificity ||
-            (spec == best_specificity && rule.level > best_rule->level)) {
-            best_rule = &rule;
-            best_specificity = spec;
-        }
-    }
-
+    const CleanupRule* best_rule = best_cleanup_rule(node);
     if (best_rule != nullptr) {
         Classification c;
         c.level = best_rule->level;

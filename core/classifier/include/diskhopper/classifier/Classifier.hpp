@@ -54,8 +54,11 @@ public:
     void apply(DirNode& root) const;
     Report summarize(const DirNode& root, size_t top_n) const;
 
+    Classification describe(const DirNode& node) const;
+
 private:
     bool rule_matches(const CleanupRule& rule, const DirNode& node) const;
+    const CleanupRule* best_cleanup_rule(const DirNode& node) const;
     bool is_under_or_equal(const std::filesystem::path& path,
                            const std::filesystem::path& base) const;
     bool is_project_root(const DirNode& node, std::string* marker_out) const;
