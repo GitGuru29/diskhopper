@@ -7,9 +7,15 @@
 #include <string>
 #include <vector>
 
+#include "diskhopper/safety/SafetyLevel.hpp"
 #include "diskhopper/scanner/FileEntry.hpp"
 
 namespace diskhopper {
+
+struct ChildItem {
+    std::string name;
+    FileType type = FileType::Other;
+};
 
 struct DirNode {
     std::filesystem::path path;
@@ -21,6 +27,13 @@ struct DirNode {
     uint64_t symlink_count = 0;
     uint64_t other_count = 0;
     std::vector<std::unique_ptr<DirNode>> children;
+    std::vector<ChildItem> items;
+
+    SafetyLevel level = SafetyLevel::Protected;
+    std::string rule_id;
+    std::string rule_name;
+    std::string reason;
+    bool direct_match = false;
 };
 
 struct ScanStats {

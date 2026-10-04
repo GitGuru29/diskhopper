@@ -56,28 +56,35 @@ ScanResult Scanner::scan(const std::filesystem::path& root,
     ScanResult result;
     result.root = root;
 
+    std::error_code resolve_ec;
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(root, resolve_ec);
+    if (resolve_ec || resolved.empty()) {
+        resolved = root;
+    }
+
     struct stat root_st;
-    if (::lstat(root.c_str(), &root_st) != 0) {
+    if (::lstat(resolved.c_str(), &root_st) != 0) {
         ++result.stats.errors;
-        result.errors.emplace_back(root.string() + ": " + std::strerror(errno));
+        result.errors.emplace_back(resolved.string() + ": " + std::strerror(errno));
         return result;
     }
     if (S_ISLNK(root_st.st_mode)) {
-        if (::stat(root.c_str(), &root_st) != 0) {
+        if (::stat(resolved.c_str(), &root_st) != 0) {
             ++result.stats.errors;
-            result.errors.emplace_back(root.string() + ": " + std::strerror(errno));
+            result.errors.emplace_back(resolved.string() + ": " + std::strerror(errno));
             return result;
         }
     }
     if (!S_ISDIR(root_st.st_mode)) {
         ++result.stats.errors;
-        result.errors.emplace_back(root.string() + ": not a directory");
+        result.errors.emplace_back(resolved.string() + ": not a directory");
         return result;
     }
 
+    result.root = resolved;
     auto tree = std::make_unique<DirNode>();
-    tree->path = root;
-    tree->name = root.filename().empty() ? root.string() : root.filename().string();
+    tree->path = resolved;
+    tree->name = resolved.filename().empty() ? resolved.string() : resolved.filename().string();
 
     std::unordered_set<InodeKey, InodeKeyHash> seen_inodes;
     constexpr size_t kMaxRecordedErrors = 100;
@@ -118,7 +125,10 @@ ScanResult Scanner::scan(const std::filesystem::path& root,
                 continue;
             }
 
-            switch (classify(st)) {
+            const FileType type = classify(st);
+            node.items.push_back(ChildItem{entry.path().filename().string(), type});
+
+            switch (type) {
                 case FileType::Directory: {
                     auto child = std::make_unique<DirNode>();
                     child->path = entry.path();
@@ -159,7 +169,7 @@ ScanResult Scanner::scan(const std::filesystem::path& root,
         }
     };
 
-    walk(root, *tree, root_st);
+    walk(resolved, *tree, root_st);
 
     result.stats.dir_count = tree->dir_count;
     result.stats.file_count = tree->file_count;

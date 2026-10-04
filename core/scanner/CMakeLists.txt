@@ -5,3 +5,5 @@ add_library(diskhopper_scanner STATIC
 target_include_directories(diskhopper_scanner PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+target_link_libraries(diskhopper_scanner PUBLIC diskhopper_safety)
