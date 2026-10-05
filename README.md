@@ -89,3 +89,7 @@ swift build
 - Auto-scans on launch; paths can be browsed or typed and scanned
 
 The CLI remains the canonical reference for all safety invariants.
+
+## v0.6: Scheduled auto-clean (macOS launchd)
+
+See [docs/SCHEDULING.md](docs/SCHEDULING.md) for setup. Safety gates apply: REVIEW→Trash, SAFE requires Time Machine + explicit consent.

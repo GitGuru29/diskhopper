@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.diskhopper.auto</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/siluna/diskhopper/build/cli/diskhopper</string>
+    <string>clean</string>
+    <string>--review</string>
+    <string>--dry-run</string>
+    <string>--json</string>
+    <string>/Users/siluna</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/siluna/Library/Logs/diskhopper-auto.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/siluna/Library/Logs/diskhopper-auto.err</string>
+</dict>
+</plist>

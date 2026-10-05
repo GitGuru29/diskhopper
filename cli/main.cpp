@@ -24,6 +24,7 @@ struct Options {
     int top_n = 10;
     int threads = 0;
     bool json = false;
+    bool quiet = false;
     bool help = false;
     bool version = false;
     bool clean_safe = false;
@@ -39,6 +40,10 @@ struct ParsedArgs {
     Options opts;
     bool ok = true;
 };
+
+void print_report_json(const diskhopper::ScanResult& scan_result,
+                        const diskhopper::Report& report);
+void print_clean_session_json(const diskhopper::CleanupSessionResult& result);
 
 void usage() {
     std::printf(
@@ -126,6 +131,8 @@ ParsedArgs parse_args(int argc, char** argv) {
             out.opts.audit_path = argv[++i];
         } else if (arg == "--json") {
             out.opts.json = true;
+        } else if (arg == "--quiet" || arg == "-q") {
+            out.opts.quiet = true;
         } else if (arg == "--safe") {
             out.opts.clean_safe = true;
         } else if (arg == "--review") {
@@ -594,13 +601,17 @@ bool run_clean_command(const ParsedArgs& args) {
     }
 
     if (items.empty()) {
-        std::printf("Nothing is cleanable under '%s' with the selected rules.\n",
-                    scan_result.root.string().c_str());
+        if (!args.opts.quiet && !args.opts.json) {
+            std::printf("Nothing is cleanable under '%s' with the selected rules.\n",
+                        scan_result.root.string().c_str());
+        }
         return true;
     }
 
-    std::printf("Plan for %s:\n", scan_result.root.string().c_str());
-    print_clean_plan(items);
+    if (!args.opts.quiet && !args.opts.json) {
+        std::printf("Plan for %s:\n", scan_result.root.string().c_str());
+        print_clean_plan(items);
+    }
 
     const bool has_delete = std::any_of(
         items.begin(), items.end(), [](const diskhopper::CleanupItem& item) {
@@ -608,21 +619,49 @@ bool run_clean_command(const ParsedArgs& args) {
         });
 
     if (args.opts.dry_run) {
-        std::printf("\nNo files were modified. (dry run)\n");
+        if (args.opts.json) {
+            diskhopper::CleanupSessionResult dr;
+            dr.planned = items.size();
+            dr.succeeded = 0;
+            dr.failed = 0;
+            dr.bytes_freed = 0;
+            dr.bytes_failed = 0;
+            dr.items.clear();
+            for (const auto& it : items) {
+                diskhopper::CleanupItemResult ir;
+                ir.path = it.path;
+                ir.rule_id = it.rule_id;
+                ir.bytes = it.bytes;
+                ir.action = it.action;
+                ir.success = false;
+                ir.note = "dry-run";
+                dr.items.push_back(ir);
+            }
+            print_clean_session_json(dr);
+            std::printf("\n");
+        } else if (!args.opts.quiet) {
+            std::printf("\nNo files were modified. (dry run)\n");
+        }
         return true;
     }
     if (has_delete && !args.opts.force) {
-        std::printf("\nNo files were modified."
-                    " SAFE items require --force for permanent deletion.\n");
+        if (!args.opts.quiet && !args.opts.json) {
+            std::printf("\nNo files were modified."
+                        " SAFE items require --force for permanent deletion.\n");
+        }
         return true;
     }
     if (has_delete && !diskhopper::time_machine_available()) {
-        std::printf("\nRefusing permanent deletion: Time Machine has no backup destination.\n");
-        std::printf("No files were modified. Add a Time Machine backup, or drop --force.\n");
+        if (!args.opts.quiet && !args.opts.json) {
+            std::printf("\nRefusing permanent deletion: Time Machine has no backup destination.\n");
+            std::printf("No files were modified. Add a Time Machine backup, or drop --force.\n");
+        }
         return true;
     }
     if (!args.opts.yes) {
-        std::printf("\nNo files were modified. Add --yes to execute.\n");
+        if (!args.opts.quiet && !args.opts.json) {
+            std::printf("\nNo files were modified. Add --yes to execute.\n");
+        }
         return true;
     }
 
@@ -637,8 +676,85 @@ bool run_clean_command(const ParsedArgs& args) {
 
     diskhopper::CleanupSessionResult result =
         diskhopper::Cleaner::run(items, options);
-    print_clean_session(result, options.audit_path);
+    if (args.opts.json) {
+        print_clean_session_json(result);
+        std::printf("\n");
+    } else if (!args.opts.quiet) {
+        print_clean_session(result, options.audit_path);
+    }
     return true;
+}
+
+
+void print_report_json(const diskhopper::ScanResult& scan_result,
+                        const diskhopper::Report& report) {
+    std::printf("{");
+    std::printf("\"root\":\"%s\",", json_escape(scan_result.root.string()).c_str());
+    std::printf("\"allocated\":%llu,\"files\":%llu,\"dirs\":%llu,\"symlinks\":%llu,\"errors\":%llu,",
+                static_cast<unsigned long long>(scan_result.allocated),
+                static_cast<unsigned long long>(scan_result.stats.file_count),
+                static_cast<unsigned long long>(scan_result.stats.dir_count),
+                static_cast<unsigned long long>(scan_result.stats.symlink_count),
+                static_cast<unsigned long long>(scan_result.stats.errors));
+    std::printf("\"safe_bytes\":%llu,\"review_bytes\":%llu,\"protected_bytes\":%llu,",
+                static_cast<unsigned long long>(report.safe_bytes),
+                static_cast<unsigned long long>(report.review_bytes),
+                static_cast<unsigned long long>(report.protected_bytes));
+    std::printf("\"safe\":[");
+    bool first = true;
+    for (const auto& [id, total] : sorted_totals(report.safe)) {
+        if (total.bytes == 0) continue;
+        if (!first) std::printf(",");
+        first = false;
+        std::printf("{\"id\":\"%s\",\"name\":\"%s\",\"bytes\":%llu,\"level\":\"safe\"}",
+                    json_escape(id).c_str(), json_escape(total.name).c_str(),
+                    static_cast<unsigned long long>(total.bytes));
+    }
+    std::printf("],\"review\":[");
+    first = true;
+    for (const auto& [id, total] : sorted_totals(report.review)) {
+        if (total.bytes == 0) continue;
+        if (!first) std::printf(",");
+        first = false;
+        std::printf("{\"id\":\"%s\",\"name\":\"%s\",\"bytes\":%llu,\"level\":\"review\"}",
+                    json_escape(id).c_str(), json_escape(total.name).c_str(),
+                    static_cast<unsigned long long>(total.bytes));
+    }
+    std::printf("],\"protected\":[");
+    first = true;
+    for (const auto& [id, total] : sorted_totals(report.protected_roots)) {
+        if (total.bytes == 0) continue;
+        if (!first) std::printf(",");
+        first = false;
+        std::printf("{\"id\":\"%s\",\"name\":\"%s\",\"bytes\":%llu,\"level\":\"protected\"}",
+                    json_escape(id).c_str(), json_escape(total.name).c_str(),
+                    static_cast<unsigned long long>(total.bytes));
+    }
+    std::printf("]}");
+}
+
+void print_clean_session_json(const diskhopper::CleanupSessionResult& result) {
+    std::printf("{");
+    std::printf("\"planned\":%zu,\"succeeded\":%zu,\"failed\":%zu,",
+                result.planned, result.succeeded, result.failed);
+    std::printf("\"bytes_freed\":%llu,\"bytes_failed\":%llu,",
+                static_cast<unsigned long long>(result.bytes_freed),
+                static_cast<unsigned long long>(result.bytes_failed));
+    std::printf("\"items\":[");
+    bool first = true;
+    for (const auto& item : result.items) {
+        if (!first) std::printf(",");
+        first = false;
+        std::printf("{\"path\":\"%s\",\"rule_id\":\"%s\",\"bytes\":%llu,"
+                    "\"action\":\"%s\",\"success\":%s,\"note\":\"%s\"}",
+                    json_escape(item.path.string()).c_str(),
+                    json_escape(item.rule_id).c_str(),
+                    static_cast<unsigned long long>(item.bytes),
+                    item.action == diskhopper::CleanupActionKind::Trash ? "trash" : "delete",
+                    item.success ? "true" : "false",
+                    json_escape(item.note).c_str());
+    }
+    std::printf("]}");
 }
 
 }
@@ -696,7 +812,14 @@ int main(int argc, char** argv) {
         classifier.apply(*result.tree);
         diskhopper::Report report =
             classifier.summarize(*result.tree, static_cast<size_t>(args.opts.top_n));
-        print_report(result, report, diskhopper::default_protection_rules());
+        if (args.opts.json) {
+            print_report_json(result, report);
+            std::printf("\n");
+            return 0;
+        }
+        if (!args.opts.quiet) {
+            print_report(result, report, diskhopper::default_protection_rules());
+        }
         return 0;
     }
 
@@ -706,7 +829,9 @@ int main(int argc, char** argv) {
                                           diskhopper::default_cleanup_rules(),
                                           diskhopper::default_protection_rules());
         classifier.apply(*result.tree);
-        print_explain(result, classifier, args.opts.top_n);
+        if (!args.opts.quiet) {
+            print_explain(result, classifier, args.opts.top_n);
+        }
         return 0;
     }
 
@@ -716,8 +841,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    print_summary(result, seconds);
-    std::printf("\n");
-    print_tree(*result.tree, 0, args.opts.max_depth);
+    if (!args.opts.quiet) {
+        print_summary(result, seconds);
+        std::printf("\n");
+        print_tree(*result.tree, 0, args.opts.max_depth);
+    }
     return 0;
 }
