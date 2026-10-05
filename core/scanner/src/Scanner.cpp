@@ -3,8 +3,11 @@
 #include <sys/stat.h>
 
 #include <cerrno>
+#include <condition_variable>
 #include <cstring>
-#include <functional>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <unordered_set>
 
 namespace diskhopper {
@@ -48,7 +51,23 @@ FileEntry make_entry(const std::filesystem::path& path, const struct stat& st) {
     return entry;
 }
 
-}
+struct NodeCtrl {
+    DirNode* node;
+    std::shared_ptr<NodeCtrl> parent;
+    std::mutex mu;
+    int pending_children = 0;
+    bool done = false;
+};
+
+struct Job {
+    std::filesystem::path dir;
+    struct stat st;
+    std::shared_ptr<NodeCtrl> ctrl;
+};
+
+constexpr size_t kMaxRecordedErrors = 100;
+
+}  // namespace
 
 ScanResult Scanner::scan(const std::filesystem::path& root,
                          const Options& options,
@@ -86,8 +105,17 @@ ScanResult Scanner::scan(const std::filesystem::path& root,
     tree->path = resolved;
     tree->name = resolved.filename().empty() ? resolved.string() : resolved.filename().string();
 
+    const size_t threads = options.threads == 0
+                               ? std::max(1u, std::thread::hardware_concurrency())
+                               : options.threads;
+    const size_t workers = std::max<size_t>(1, threads);
+
+    std::mutex shared_mu;
+    std::condition_variable cv;
+    std::deque<Job> jobs;
     std::unordered_set<InodeKey, InodeKeyHash> seen_inodes;
-    constexpr size_t kMaxRecordedErrors = 100;
+    seen_inodes.reserve(1u << 20);
+    size_t pending_jobs = 0;
 
     auto record_error = [&](const std::string& message) {
         ++result.stats.errors;
@@ -96,80 +124,189 @@ ScanResult Scanner::scan(const std::filesystem::path& root,
         }
     };
 
-    std::function<void(const std::filesystem::path&, DirNode&, const struct stat&)> walk;
-
-    walk = [&](const std::filesystem::path& dir, DirNode& node, const struct stat& dst) {
-        ++result.stats.dir_count;
-        node.dir_count = 1;
-        node.allocated += static_cast<uint64_t>(dst.st_blocks) * 512ULL;
-        node.apparent += static_cast<uint64_t>(dst.st_size);
-
-        std::error_code ec;
-        auto it = std::filesystem::directory_iterator(dir, ec);
-        if (ec) {
-            record_error(dir.string() + ": " + ec.message());
-            return;
-        }
-
-        for (std::filesystem::directory_iterator end; it != end; it.increment(ec)) {
-            if (ec) {
-                record_error(dir.string() + ": " + ec.message());
-                ec.clear();
-                continue;
-            }
-            const auto& entry = *it;
-
-            struct stat st;
-            if (::lstat(entry.path().c_str(), &st) != 0) {
-                record_error(entry.path().string() + ": " + std::strerror(errno));
-                continue;
-            }
-
-            const FileType type = classify(st);
-            node.items.push_back(ChildItem{entry.path().filename().string(), type});
-
-            switch (type) {
-                case FileType::Directory: {
-                    auto child = std::make_unique<DirNode>();
-                    child->path = entry.path();
-                    child->name = entry.path().filename().string();
-                    walk(entry.path(), *child, st);
-                    node.dir_count += child->dir_count;
-                    node.file_count += child->file_count;
-                    node.symlink_count += child->symlink_count;
-                    node.other_count += child->other_count;
-                    node.apparent += child->apparent;
-                    node.allocated += child->allocated;
-                    node.children.push_back(std::move(child));
-                    break;
+    std::function<void(NodeCtrl*)> resolve_node;
+    resolve_node = [&](NodeCtrl* ctrl) {
+        NodeCtrl* cur = ctrl;
+        while (cur != nullptr) {
+            NodeCtrl* parent = cur->parent.get();
+            if (parent == nullptr) {
+                {
+                    std::lock_guard<std::mutex> lock(shared_mu);
+                    --pending_jobs;
                 }
-                case FileType::File: {
-                    const uint64_t apparent = static_cast<uint64_t>(st.st_size);
-                    const uint64_t allocated = static_cast<uint64_t>(st.st_blocks) * 512ULL;
-                    if (!options.dedupe_hardlinks ||
-                        seen_inodes.insert(InodeKey{st.st_dev, st.st_ino}).second) {
-                        node.apparent += apparent;
-                        node.allocated += allocated;
-                    } else {
-                        ++result.stats.hardlink_deduped;
-                    }
-                    ++node.file_count;
-                    if (on_file) {
-                        on_file(make_entry(entry.path(), st));
-                    }
-                    break;
-                }
-                case FileType::Symlink:
-                    ++node.symlink_count;
-                    break;
-                default:
-                    ++node.other_count;
-                    break;
+                cv.notify_all();
+                return;
             }
+            NodeCtrl* next = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(parent->mu);
+                parent->node->dir_count += cur->node->dir_count;
+                parent->node->file_count += cur->node->file_count;
+                parent->node->symlink_count += cur->node->symlink_count;
+                parent->node->other_count += cur->node->other_count;
+                parent->node->apparent += cur->node->apparent;
+                parent->node->allocated += cur->node->allocated;
+                --parent->pending_children;
+                if (parent->done && parent->pending_children == 0) {
+                    next = parent;
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(shared_mu);
+                --pending_jobs;
+            }
+            cv.notify_all();
+            cur = next;
         }
     };
 
-    walk(resolved, *tree, root_st);
+    std::function<void(const Job&)> scan_directory;
+    scan_directory = [&](const Job& job) {
+        DirNode& node = *job.ctrl->node;
+
+        {
+            std::lock_guard<std::mutex> lock(job.ctrl->mu);
+            node.dir_count = 1;
+            node.allocated += static_cast<uint64_t>(job.st.st_blocks) * 512ULL;
+            node.apparent += static_cast<uint64_t>(job.st.st_size);
+        }
+
+        std::error_code ec;
+        auto it = std::filesystem::directory_iterator(job.dir, ec);
+        if (ec) {
+            {
+                std::lock_guard<std::mutex> lock(shared_mu);
+                record_error(job.dir.string() + ": " + ec.message());
+            }
+        } else {
+            for (std::filesystem::directory_iterator end; it != end; it.increment(ec)) {
+                if (ec) {
+                    {
+                        std::lock_guard<std::mutex> lock(shared_mu);
+                        record_error(job.dir.string() + ": " + ec.message());
+                    }
+                    ec.clear();
+                    continue;
+                }
+                const auto& entry = *it;
+
+                struct stat st;
+                if (::lstat(entry.path().c_str(), &st) != 0) {
+                    {
+                        std::lock_guard<std::mutex> lock(shared_mu);
+                        record_error(entry.path().string() + ": " + std::strerror(errno));
+                    }
+                    continue;
+                }
+
+                const FileType type = classify(st);
+
+                if (type == FileType::Directory) {
+                    Job child_job;
+                    {
+                        std::lock_guard<std::mutex> lock(job.ctrl->mu);
+                        node.items.push_back(ChildItem{entry.path().filename().string(), type});
+                        auto child = std::make_unique<DirNode>();
+                        child->path = entry.path();
+                        child->name = entry.path().filename().string();
+                        auto child_ctrl = std::make_shared<NodeCtrl>();
+                        child_ctrl->node = child.get();
+                        child_ctrl->parent = job.ctrl;
+                        ++job.ctrl->pending_children;
+                        node.children.push_back(std::move(child));
+                        child_job = Job{entry.path(), st, std::move(child_ctrl)};
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(shared_mu);
+                        ++pending_jobs;
+                        jobs.push_back(std::move(child_job));
+                    }
+                    cv.notify_one();
+                    continue;
+                }
+
+                bool first = true;
+                if (type == FileType::File) {
+                    std::lock_guard<std::mutex> lock(shared_mu);
+                    if (options.dedupe_hardlinks) {
+                        first = seen_inodes.insert(InodeKey{st.st_dev, st.st_ino}).second;
+                        if (!first) {
+                            ++result.stats.hardlink_deduped;
+                        }
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(job.ctrl->mu);
+                    node.items.push_back(ChildItem{entry.path().filename().string(), type});
+                    switch (type) {
+                        case FileType::File:
+                            if (first) {
+                                node.apparent += static_cast<uint64_t>(st.st_size);
+                                node.allocated +=
+                                    static_cast<uint64_t>(st.st_blocks) * 512ULL;
+                            }
+                            ++node.file_count;
+                            break;
+                        case FileType::Symlink:
+                            ++node.symlink_count;
+                            break;
+                        default:
+                            ++node.other_count;
+                            break;
+                    }
+                }
+                if (type == FileType::File && on_file) {
+                    on_file(make_entry(entry.path(), st));
+                }
+            }
+        }
+
+        bool resolve_self = false;
+        {
+            std::lock_guard<std::mutex> lock(job.ctrl->mu);
+            job.ctrl->done = true;
+            if (job.ctrl->pending_children == 0) {
+                resolve_self = true;
+            }
+        }
+        if (resolve_self) {
+            resolve_node(job.ctrl.get());
+        }
+    };
+
+    auto root_ctrl = std::make_shared<NodeCtrl>();
+    root_ctrl->node = tree.get();
+    root_ctrl->parent = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(shared_mu);
+        ++pending_jobs;
+        jobs.push_back(Job{resolved, root_st, root_ctrl});
+    }
+
+    std::vector<std::thread> pool;
+    pool.reserve(workers);
+    for (size_t i = 0; i < workers; ++i) {
+        pool.emplace_back([&]() {
+            while (true) {
+                Job job;
+                {
+                    std::unique_lock<std::mutex> lock(shared_mu);
+                    cv.wait(lock, [&] {
+                        return !jobs.empty() || pending_jobs == 0;
+                    });
+                    if (jobs.empty() && pending_jobs == 0) break;
+                    job = std::move(jobs.front());
+                    jobs.pop_front();
+                }
+                scan_directory(job);
+            }
+        });
+    }
+
+    for (auto& thread : pool) {
+        thread.join();
+    }
 
     result.stats.dir_count = tree->dir_count;
     result.stats.file_count = tree->file_count;

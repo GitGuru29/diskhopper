@@ -46,14 +46,14 @@ diskhopper clean --safe --force --dry-run ~   # preview permanent deletes
 
 ## Benchmarks
 
-Measured on Apple Silicon, macOS 27, AppleClang 21, Release build. Allocated size uses `st_blocks * 512` (sparse-aware); hard links are counted once.
+Measured on Apple Silicon, macOS 27, AppleClang 21, Release build. Allocated size uses `st_blocks * 512` (sparse-aware); hard links are counted once. The scanner shards the walk across worker threads (`--threads N`, default = CPU count).
 
 | Path | Items | Allocated | Scan time | Throughput |
 | --- | --- | --- | --- | --- |
-| `~/Documents` | 6,876 | - | 0.06 s | ~106k items/s |
-| `~/` (home) | 864,813 | 50.2 GB | 26.78 s | ~32k items/s |
+| `~/Documents` | 6,876 | - | 0.03 s | ~230k items/s |
+| `~/` (home) | 866,630 | 50.2 GB | 6.39 s | ~136k items/s |
 
-Home scan counts 864k items including 31.7k symlinks; scan speed is dominated by cold page cache and directory reads.
+Home scan counts 866k items including 31.7k symlinks; the previous single-threaded walk took 26.78 s (~32k items/s), so parallelism is ~4x faster here.
 
 ## Layout
 
@@ -63,7 +63,7 @@ cli/      diskhopper executable
 macos/    (reserved for the SwiftUI app - v0.6)
 rules/    (rule source data for generation)
 docs/     (design notes)
-tests/    core_tests - 41 checks via CTest
+tests/    core_tests - 46 checks via CTest
 ```
 
 ## Roadmap

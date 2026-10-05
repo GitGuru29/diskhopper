@@ -22,6 +22,7 @@ struct Options {
     std::filesystem::path root = ".";
     int max_depth = 2;
     int top_n = 10;
+    int threads = 0;
     bool json = false;
     bool help = false;
     bool version = false;
@@ -58,6 +59,7 @@ void usage() {
         "Options:\n"
         "  --depth N    Max tree depth to print (default 2)\n"
         "  --top N      Top entries to list (default 10)\n"
+        "  --threads N  Scanner worker threads (default: CPU count)\n"
         "  --json       Emit machine-readable JSON (scan only)\n"
         "  --safe       Include SAFE items in a clean plan\n"
         "  --review     Include REVIEW items in a clean plan\n"
@@ -108,6 +110,13 @@ ParsedArgs parse_args(int argc, char** argv) {
                 return out;
             }
             out.opts.top_n = std::atoi(argv[++i]);
+        } else if (arg == "--threads") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "error: --threads requires a value\n");
+                out.ok = false;
+                return out;
+            }
+            out.opts.threads = std::atoi(argv[++i]);
         } else if (arg == "--audit") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "error: --audit requires a value\n");
@@ -527,7 +536,9 @@ bool run_clean_command(const ParsedArgs& args) {
                                       diskhopper::default_cleanup_rules(),
                                       diskhopper::default_protection_rules());
     diskhopper::Scanner scanner;
-    diskhopper::ScanResult scan_result = scanner.scan(args.opts.root);
+    diskhopper::Scanner::Options scan_options;
+    scan_options.threads = static_cast<size_t>(args.opts.threads);
+    diskhopper::ScanResult scan_result = scanner.scan(args.opts.root, scan_options);
     if (!scan_result.tree) {
         std::fprintf(stderr, "error: unable to scan '%s'\n", args.opts.root.c_str());
         return false;
@@ -629,7 +640,9 @@ int main(int argc, char** argv) {
 
     diskhopper::Scanner scanner;
     const auto start = std::chrono::steady_clock::now();
-    diskhopper::ScanResult result = scanner.scan(args.opts.root);
+    diskhopper::Scanner::Options scan_options;
+    scan_options.threads = static_cast<size_t>(args.opts.threads);
+    diskhopper::ScanResult result = scanner.scan(args.opts.root, scan_options);
     const auto end = std::chrono::steady_clock::now();
     const double seconds = std::chrono::duration<double>(end - start).count();
 

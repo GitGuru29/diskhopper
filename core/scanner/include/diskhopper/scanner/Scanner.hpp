@@ -59,10 +59,11 @@ using FileCallback = std::function<void(const FileEntry&)>;
 class Scanner {
 public:
     struct Options {
-        Options() : follow_symlinks(false), dedupe_hardlinks(true) {}
+        Options() : follow_symlinks(false), dedupe_hardlinks(true), threads(0) {}
 
         bool follow_symlinks;
         bool dedupe_hardlinks;
+        size_t threads;
     };
 
     ScanResult scan(const std::filesystem::path& root,

@@ -79,6 +79,23 @@ void test_scan() {
     std::error_code canonical_ec;
     fs::path expected_root = fs::weakly_canonical(root, canonical_ec);
     check(result.tree->path == expected_root, "scan: root canonicalized");
+
+    dh::Scanner::Options one;
+    one.threads = 1;
+    dh::ScanResult single = scanner.scan(root, one);
+    dh::Scanner::Options many;
+    many.threads = 8;
+    dh::ScanResult parallel = scanner.scan(root, many);
+    check(single.stats.file_count == parallel.stats.file_count,
+          "scan: parallel file count matches single-threaded");
+    check(single.stats.dir_count == parallel.stats.dir_count,
+          "scan: parallel dir count matches single-threaded");
+    check(single.allocated == parallel.allocated,
+          "scan: parallel allocated matches single-threaded");
+    check(single.apparent == parallel.apparent,
+          "scan: parallel apparent matches single-threaded");
+    check(single.stats.hardlink_deduped == parallel.stats.hardlink_deduped,
+          "scan: parallel hardlink dedupe matches single-threaded");
 }
 
 const dh::DirNode* find_dir(const dh::DirNode& node, const std::string& name) {
