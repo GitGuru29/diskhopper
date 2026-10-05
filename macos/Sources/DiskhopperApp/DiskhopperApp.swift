@@ -9,6 +9,9 @@ struct DiskhopperApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 780, minHeight: 540)
+                .onAppear {
+                    model.scanDirectory()
+                }
         }
     }
 }

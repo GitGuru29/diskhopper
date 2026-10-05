@@ -24,7 +24,7 @@ struct CleanStats {
 
 @MainActor
 final class DiskhopperModel: ObservableObject {
-    @Published var path: String = NSHomeDirectory()
+    @Published var path: String = NSHomeDirectory() + "/Downloads"
     @Published var isScanning = false
     @Published var isCleaning = false
     @Published var errorMessage: String?
