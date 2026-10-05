@@ -42,6 +42,7 @@ fs::path build_fixture() {
     std::error_code ec;
     fs::remove_all(root, ec);
     fs::create_directories(root / "Library/Caches/com.google.Chrome", ec);
+    fs::create_directories(root / "Library/Caches/pip", ec);
     fs::create_directories(root / "Library/Developer/Xcode/DerivedData", ec);
     fs::create_directories(root / "Documents/notes", ec);
     fs::create_directories(root / "Downloads/AeroDrop/src", ec);
@@ -50,15 +51,20 @@ fs::path build_fixture() {
     fs::create_directories(root / "project/src", ec);
     fs::create_directories(root / "node_modules/package", ec);
     fs::create_directories(root / "plain", ec);
+    fs::create_directories(root / ".codex/.tmp", ec);
+    fs::create_directories(root / ".docker", ec);
 
     write_bytes(root / "big.dat", 5u * 1024 * 1024);
     fs::create_hard_link(root / "big.dat", root / "hardlink.dat", ec);
     std::ofstream(root / "Library/Caches/com.google.Chrome/entry", std::ios::binary) << "x";
+    std::ofstream(root / "Library/Caches/pip/wheel.whl", std::ios::binary) << "x";
     std::ofstream(root / "Library/Developer/Xcode/DerivedData/entry", std::ios::binary) << "x";
     std::ofstream(root / "Documents/notes/note.txt", std::ios::binary) << "note";
     std::ofstream(root / "Downloads/AeroDrop/src/main.c", std::ios::binary) << "main";
     std::ofstream(root / "project/src/main.c", std::ios::binary) << "main";
     std::ofstream(root / "node_modules/package/index.js", std::ios::binary) << "index";
+    std::ofstream(root / ".codex/.tmp/bundle.tmp", std::ios::binary) << "tmp";
+    std::ofstream(root / ".docker/config.json", std::ios::binary) << "{}";
     std::ofstream(root / "plain/data.bin", std::ios::binary) << "data";
     fs::create_directory_symlink(root, root / "loop", ec);
     return root;
@@ -69,8 +75,8 @@ void test_scan() {
     dh::Scanner scanner;
     dh::ScanResult result = scanner.scan(root);
 
-    check(result.stats.file_count == 9, "scan: expected 9 files");
-    check(result.stats.dir_count == 19, "scan: expected 19 directories");
+    check(result.stats.file_count == 12, "scan: expected 12 files");
+    check(result.stats.dir_count == 23, "scan: expected 23 directories");
     check(result.stats.symlink_count == 1, "scan: symlink counted, not followed");
     check(result.stats.hardlink_deduped == 1, "scan: hard link deduplicated");
     check(result.allocated >= 5u * 1024 * 1024, "scan: allocated counts big file");
@@ -117,6 +123,18 @@ void test_classification() {
     const dh::DirNode* chrome = find_dir(*find_dir(*find_dir(*result.tree, "Library"), "Caches"), "com.google.Chrome");
     check(chrome != nullptr && chrome->level == dh::SafetyLevel::Safe, "class: Chrome cache SAFE");
 
+    const dh::DirNode* pip = find_dir(*find_dir(*find_dir(*result.tree, "Library"), "Caches"), "pip");
+    check(pip != nullptr && pip->level == dh::SafetyLevel::Safe, "class: pip cache SAFE");
+
+    const dh::DirNode* codex_tmp = find_dir(*find_dir(*result.tree, ".codex"), ".tmp");
+    check(codex_tmp != nullptr && codex_tmp->level == dh::SafetyLevel::Review,
+          "class: Codex temp REVIEW");
+
+    const dh::DirNode* docker = find_dir(*result.tree, ".docker");
+    check(docker != nullptr && docker->level == dh::SafetyLevel::Protected &&
+              docker->rule_id == "prot-docker",
+          "class: Docker config protected");
+
     const dh::DirNode* derived = find_dir(*find_dir(*find_dir(*find_dir(*result.tree, "Library"), "Developer"), "Xcode"), "DerivedData");
     check(derived != nullptr && derived->level == dh::SafetyLevel::Review, "class: DerivedData REVIEW");
 
@@ -146,11 +164,16 @@ void test_classification() {
     check(report.safe.find("chrome-cache") != report.safe.end(), "report: chrome-cache present");
     check(report.safe["chrome-cache"].bytes > 0, "report: chrome-cache bytes > 0");
     check(report.review.find("node_modules") != report.review.end(), "report: node_modules present");
+    check(report.review.find("codex-tmp") != report.review.end(), "report: codex-tmp present");
     check(report.protected_roots.find("prot-documents") != report.protected_roots.end(),
           "report: Documents in protected roots");
+    check(report.protected_roots.find("prot-docker") != report.protected_roots.end(),
+          "report: Docker in protected roots");
     check(report.safe_bytes + report.review_bytes == report.safe["chrome-cache"].bytes +
+              report.safe["pip-cache"].bytes +
               report.review["node_modules"].bytes + report.review["all-caches"].bytes +
-              report.review["xcode-data"].bytes + report.review["xcode-derived"].bytes,
+              report.review["xcode-data"].bytes + report.review["xcode-derived"].bytes +
+              report.review["codex-tmp"].bytes,
           "report: cleanable total is sum of rule totals");
 }
 

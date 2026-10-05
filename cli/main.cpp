@@ -16,7 +16,7 @@
 
 namespace {
 
-const char* kVersion = "0.3.0";
+const char* kVersion = "0.4.0";
 
 struct Options {
     std::filesystem::path root = ".";

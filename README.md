@@ -15,7 +15,7 @@ Every path is classified on three axes, checked **again at delete time**:
 
 - **SAFE** - deterministic, regenerable (build caches, system logs). Permanent deletion is allowed only with `--force`, and only if Time Machine has a backup destination.
 - **REVIEW** - potentially removable, derive before assuming (node_modules, xcode data). Always goes to **Trash**, never permanent.
-- **PROTECTED** - never offered for cleanup: user documents, home, system, secrets. 17 hard-coded protection roots support the policy; unclassified paths are protected by default.
+- **PROTECTED** - never offered for cleanup: user documents, home, system, secrets. 21 hard-coded protection roots support the policy; unclassified paths are protected by default.
 - Project trees (`.git`, `package.json`, `Cargo.toml`, ...) are detected and protected as a single unit.
 
 Deletion honors Trash-first semantics, refuses symlink targets and missing paths, re-canonicalizes nothing (the scanned tree is authoritative), and logs every session to an optional audit file. The cleaner never shells out - only direct filesystem/Cocoa APIs.
@@ -71,6 +71,6 @@ tests/    core_tests - 46 checks via CTest
 - v0.1 scanner + JSON  - done
 - v0.2 classifier, safety model, report/explain - done
 - v0.3 cleaner with Trash-first + Time Machine gate - done
-- v0.4 developer-edition rule packs
+- v0.4 developer rule packs (pip/uv/brew/yarn/pnpm/bun/pods, codex/opencode/dart cache layout, .config/.docker/.netrc protection) - done
 - v0.5 SwiftUI app
 - v0.6 scheduled auto-clean
