@@ -390,6 +390,40 @@ void collect_totals(const diskhopper::DirNode& node,
     for (const auto& child : node.children) collect_totals(*child, classifier, totals);
 }
 
+void print_drill(const diskhopper::DirNode& kid,
+                 const diskhopper::Classifier& classifier,
+                 int max_drill) {
+    if (own_bytes(kid) * 4 >= kid.allocated) return;
+    std::vector<const diskhopper::DirNode*> inside;
+    inside.reserve(kid.children.size());
+    for (const auto& child : kid.children) inside.push_back(child.get());
+    std::sort(inside.begin(), inside.end(),
+              [](const diskhopper::DirNode* a, const diskhopper::DirNode* b) {
+                  return a->allocated > b->allocated;
+              });
+    size_t shown = 0;
+    uint64_t hidden_bytes = 0;
+    size_t hidden_count = 0;
+    for (const diskhopper::DirNode* inner : inside) {
+        if (empty_node(*inner)) continue;
+        if (shown >= static_cast<size_t>(max_drill)) {
+            hidden_bytes += inner->allocated;
+            ++hidden_count;
+            continue;
+        }
+        const diskhopper::Classification c = classifier.describe(*inner);
+        std::printf("      %8s  %-20s  [%-7s]\n",
+                    human(inner->allocated).c_str(),
+                    inner->name.c_str(),
+                    explain_tag(c));
+        ++shown;
+    }
+    if (hidden_count > 0) {
+        std::printf("      %8s  ... and %zu more inside\n",
+                    human(hidden_bytes).c_str(), hidden_count);
+    }
+}
+
 void print_explain_children(const diskhopper::DirNode& node,
                             const diskhopper::Classifier& classifier,
                             int max_children) {
@@ -417,6 +451,9 @@ void print_explain_children(const diskhopper::DirNode& node,
                     kid->name.c_str(),
                     explain_tag(c),
                     c.reason.c_str());
+        if (c.name == "Other") {
+            print_drill(*kid, classifier, 3);
+        }
         ++shown;
     }
     if (hidden_count > 0) {
