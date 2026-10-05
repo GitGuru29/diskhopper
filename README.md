@@ -60,10 +60,10 @@ Home scan counts 866k items including 31.7k symlinks; the previous single-thread
 ```
 core/     C++17 libraries (scanner, rules, classifier, cleaner, platform, safety)
 cli/      diskhopper executable
-macos/    (reserved for the SwiftUI app - v0.6)
+macos/    SwiftUI app (v0.5)
 rules/    (rule source data for generation)
 docs/     (design notes)
-tests/    core_tests - 46 checks via CTest
+tests/    core_tests - 51 checks via CTest
 ```
 
 ## Roadmap
@@ -72,5 +72,20 @@ tests/    core_tests - 46 checks via CTest
 - v0.2 classifier, safety model, report/explain - done
 - v0.3 cleaner with Trash-first + Time Machine gate - done
 - v0.4 developer rule packs (pip/uv/brew/yarn/pnpm/bun/pods, codex/opencode/dart cache layout, .config/.docker/.netrc protection) - done
-- v0.5 SwiftUI app
+- v0.5 SwiftUI app - done
 - v0.6 scheduled auto-clean
+
+## SwiftUI GUI
+
+```bash
+swift build
+./.build/debug/DiskhopperApp
+```
+
+- Runs on top of the same C++ core (parallel scanner, safety model, rules)
+- REVIEW items move to Trash; SAFE items move to Trash by default
+- Permanent delete of SAFE items is only allowed when Time Machine has a destination
+- Audit log written to `~/.diskhopper/audit.log`
+- Auto-scans on launch; paths can be browsed or typed and scanned
+
+The CLI remains the canonical reference for all safety invariants.
